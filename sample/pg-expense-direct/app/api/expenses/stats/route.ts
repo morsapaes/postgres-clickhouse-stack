@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import pool from '@/lib/db';
 
+async function timedQuery(label: string, text: string, params: any[]) {
+  const start = performance.now();
+  const result = await pool.query(text, params);
+  const ms = Math.round(performance.now() - start);
+  return { result, timing: { label, ms } };
+}
+
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
@@ -23,27 +30,27 @@ export async function GET(request: NextRequest) {
       params.push(endDate);
     }
 
-    // Total expenses
-    const totalResult = await pool.query(
+    const totalQuery = await timedQuery(
+      'Total expenses',
       `SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total FROM expenses ${whereClause}`,
       params
     );
 
-    // Expenses by category
-    const categoryResult = await pool.query(
-      `SELECT 
-        COALESCE(category, 'Uncategorized') as category, 
-        COUNT(*) as count, 
-        SUM(amount) as total 
-       FROM expenses ${whereClause} 
-       GROUP BY category 
+    const categoryQuery = await timedQuery(
+      'By category',
+      `SELECT
+        COALESCE(category, 'Uncategorized') as category,
+        COUNT(*) as count,
+        SUM(amount) as total
+       FROM expenses ${whereClause}
+       GROUP BY category
        ORDER BY total DESC`,
       params
     );
 
-    // Monthly aggregation
-    const monthlyResult = await pool.query(
-      `SELECT 
+    const monthlyQuery = await timedQuery(
+      'By month',
+      `SELECT
         DATE_TRUNC('month', date) as month,
         COUNT(*) as count,
         SUM(amount) as total
@@ -53,9 +60,9 @@ export async function GET(request: NextRequest) {
       params
     );
 
-    // Daily aggregation for last 30 days (or filtered range)
-    const dailyResult = await pool.query(
-      `SELECT 
+    const dailyQuery = await timedQuery(
+      'Daily activity',
+      `SELECT
         date,
         COUNT(*) as count,
         SUM(amount) as total
@@ -66,22 +73,31 @@ export async function GET(request: NextRequest) {
       params
     );
 
+    const backend = process.env.DB_SCHEMA ? 'ClickHouse (via FDW)' : 'PostgreSQL';
+
     const stats = {
+      backend,
+      queryTimings: [
+        totalQuery.timing,
+        categoryQuery.timing,
+        monthlyQuery.timing,
+        dailyQuery.timing,
+      ],
       total: {
-        count: parseInt(totalResult.rows[0].count),
-        amount: parseFloat(totalResult.rows[0].total)
+        count: parseInt(totalQuery.result.rows[0].count),
+        amount: parseFloat(totalQuery.result.rows[0].total)
       },
-      byCategory: categoryResult.rows.map(row => ({
+      byCategory: categoryQuery.result.rows.map(row => ({
         category: row.category,
         count: parseInt(row.count),
         total: parseFloat(row.total)
       })),
-      byMonth: monthlyResult.rows.map(row => ({
+      byMonth: monthlyQuery.result.rows.map(row => ({
         month: row.month,
         count: parseInt(row.count),
         total: parseFloat(row.total)
       })),
-      daily: dailyResult.rows.map(row => ({
+      daily: dailyQuery.result.rows.map(row => ({
         date: row.date,
         count: parseInt(row.count),
         total: parseFloat(row.total)

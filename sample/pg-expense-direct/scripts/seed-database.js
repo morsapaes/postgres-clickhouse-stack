@@ -1,4 +1,7 @@
 const { Pool } = require('pg');
+const os = require('os');
+
+const CONCURRENCY = parseInt(process.env.SEED_CONCURRENCY, 10) || os.cpus().length;
 
 const pool = new Pool({
   user: process.env.DB_USER || 'admin',
@@ -6,6 +9,7 @@ const pool = new Pool({
   database: process.env.DB_NAME || 'postgres',
   password: process.env.DB_PASSWORD || 'password',
   port: parseInt(process.env.DB_PORT || '5432'),
+  max: CONCURRENCY,
 });
 
 const categories = [
@@ -59,67 +63,65 @@ const descriptions = {
   ]
 };
 
-// Generate random amount based on category
-function getRandomAmount(category) {
-  const ranges = {
-    'Food & Dining': { min: 5, max: 150 },
-    'Transportation': { min: 3, max: 200 },
-    'Shopping': { min: 10, max: 500 },
-    'Entertainment': { min: 8, max: 300 },
-    'Bills & Utilities': { min: 25, max: 800 },
-    'Healthcare': { min: 20, max: 1000 },
-    'Travel': { min: 50, max: 2000 },
-    'Education': { min: 30, max: 1200 },
-    'Other': { min: 5, max: 250 }
-  };
+const amountRanges = {
+  'Food & Dining': [5, 145],
+  'Transportation': [3, 197],
+  'Shopping': [10, 490],
+  'Entertainment': [8, 292],
+  'Bills & Utilities': [25, 775],
+  'Healthcare': [20, 980],
+  'Travel': [50, 1950],
+  'Education': [30, 1170],
+  'Other': [5, 245]
+};
 
-  const range = ranges[category];
-  return (Math.random() * (range.max - range.min) + range.min).toFixed(2);
+// Precompute date range
+const now = Date.now();
+const twoYearsAgo = now - 2 * 365.25 * 24 * 60 * 60 * 1000;
+const dateRange = now - twoYearsAgo;
+
+function generateRow() {
+  const category = categories[(Math.random() * categories.length) | 0];
+  const descs = descriptions[category];
+  const description = descs[(Math.random() * descs.length) | 0];
+  const [min, span] = amountRanges[category];
+  const amount = Math.round((min + Math.random() * span) * 100) / 100;
+  const date = new Date(twoYearsAgo + Math.random() * dateRange).toISOString().slice(0, 10);
+  return [description, amount, category, date];
 }
 
-// Generate random date within the last 2 years
-function getRandomDate() {
-  const start = new Date();
-  start.setFullYear(start.getFullYear() - 2);
-  const end = new Date();
+// Build a multi-row INSERT for a chunk of rows
+const CHUNK_SIZE = 250; // 250 rows × 4 params = 1000 params, well within PG limit
 
-  const randomTime = start.getTime() + Math.random() * (end.getTime() - start.getTime());
-  return new Date(randomTime).toISOString().split('T')[0];
-}
-
-// Generate a batch of expenses
-function generateExpenseBatch(batchSize) {
-  const expenses = [];
-
-  for (let i = 0; i < batchSize; i++) {
-    const category = categories[Math.floor(Math.random() * categories.length)];
-    const description = descriptions[category][Math.floor(Math.random() * descriptions[category].length)];
-    const amount = getRandomAmount(category);
-    const date = getRandomDate();
-
-    expenses.push([description, parseFloat(amount), category, date]);
+function buildInsert(rows) {
+  const values = new Array(rows.length * 4);
+  const placeholders = new Array(rows.length);
+  for (let i = 0; i < rows.length; i++) {
+    const o = i * 4;
+    values[o] = rows[i][0];
+    values[o + 1] = rows[i][1];
+    values[o + 2] = rows[i][2];
+    values[o + 3] = rows[i][3];
+    placeholders[i] = `($${o + 1},$${o + 2},$${o + 3},$${o + 4})`;
   }
-
-  return expenses;
+  return {
+    text: `INSERT INTO expenses (description, amount, category, date) VALUES ${placeholders.join(',')}`,
+    values
+  };
 }
 
 async function seedDatabase() {
-  // Use a reasonable default (10,000,000 rows) and allow override via SEED_EXPENSE_ROWS env var
   const DEFAULT_TARGET_ROWS = 10000000;
   const targetRows = parseInt(process.env.SEED_EXPENSE_ROWS, 10) || DEFAULT_TARGET_ROWS;
-  const batchSize = 1000; // Smaller batch size to avoid parameter limits
+  const batchSize = 5000;
   const totalBatches = Math.ceil(targetRows / batchSize);
 
-  console.log(`Starting database seeding: ${targetRows.toLocaleString()} rows in ${totalBatches.toLocaleString()} batches`);
-  if (targetRows > 10000000) {
-    console.log('Warning: Seeding a very large number of rows may take a long time and consume significant disk space.');
-  }
+  console.log(`Starting database seeding: ${targetRows.toLocaleString()} rows (${CONCURRENCY} workers)`);
 
   try {
-    // Check current row count
     const countResult = await pool.query('SELECT COUNT(*) FROM expenses');
     const currentCount = parseInt(countResult.rows[0].count);
-    console.log(`Current expense count: ${currentCount}`);
+    console.log(`Current expense count: ${currentCount.toLocaleString()}`);
 
     if (currentCount >= targetRows) {
       console.log('Database already has sufficient data. Skipping seed.');
@@ -129,37 +131,26 @@ async function seedDatabase() {
     const rowsToInsert = targetRows - currentCount;
     const batchesToInsert = Math.ceil(rowsToInsert / batchSize);
 
-    console.log(`Inserting ${rowsToInsert.toLocaleString()} additional rows in ${batchesToInsert.toLocaleString()} batches...`);
+    console.log(`Inserting ${rowsToInsert.toLocaleString()} rows in ${batchesToInsert.toLocaleString()} batches...`);
 
     const startTime = Date.now();
+    let completedBatches = 0;
 
-    for (let batch = 0; batch < batchesToInsert; batch++) {
-      const currentBatchSize = Math.min(batchSize, rowsToInsert - (batch * batchSize));
-      const expenses = generateExpenseBatch(currentBatchSize);
+    async function insertBatch(batchIndex) {
+      const currentBatchSize = Math.min(batchSize, rowsToInsert - (batchIndex * batchSize));
+      const rows = new Array(currentBatchSize);
+      for (let i = 0; i < currentBatchSize; i++) {
+        rows[i] = generateRow();
+      }
 
-      // Use regular INSERT with smaller chunks to avoid parameter limits
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
 
-        // Break the batch into smaller chunks of 100 rows (400 parameters each)
-        for (let i = 0; i < expenses.length; i += 100) {
-          const chunk = expenses.slice(i, i + 100);
-          const values = [];
-          const placeholders = [];
-
-          chunk.forEach((expense, index) => {
-            const offset = index * 4;
-            placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4})`);
-            values.push(...expense);
-          });
-
-          const query = `
-            INSERT INTO expenses (description, amount, category, date) 
-            VALUES ${placeholders.join(', ')}
-          `;
-
-          await client.query(query, values);
+        for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+          const chunk = rows.slice(i, i + CHUNK_SIZE);
+          const query = buildInsert(chunk);
+          await client.query(query);
         }
 
         await client.query('COMMIT');
@@ -170,40 +161,41 @@ async function seedDatabase() {
         client.release();
       }
 
-      // Progress reporting
-      const completed = batch + 1;
-      const progress = ((completed / batchesToInsert) * 100).toFixed(3);
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-      const rowsInserted = completed * batchSize;
-      const rate = (rowsInserted / (elapsed / 60)).toFixed(0); // rows per minute
-
-      if (completed % 1000 === 0 || completed === batchesToInsert) {
-        const eta = batchesToInsert > completed ?
-          Math.round((batchesToInsert - completed) * (elapsed / completed / 60)) : 0;
-        console.log(`Progress: ${completed.toLocaleString()}/${batchesToInsert.toLocaleString()} batches (${progress}%) - ${elapsed}s elapsed - ${rate} rows/min - ETA: ${eta}min`);
+      completedBatches++;
+      if (completedBatches % 100 === 0 || completedBatches === batchesToInsert) {
+        const elapsedSec = (Date.now() - startTime) / 1000;
+        const rowsDone = completedBatches * batchSize;
+        const progress = ((completedBatches / batchesToInsert) * 100).toFixed(1);
+        const rate = Math.round(rowsDone / elapsedSec).toLocaleString();
+        const remaining = batchesToInsert - completedBatches;
+        const eta = remaining > 0 ? Math.round(remaining * (elapsedSec / completedBatches)) : 0;
+        console.log(`Progress: ${progress}% - ${rowsDone.toLocaleString()} rows - ${rate} rows/s - ${elapsedSec.toFixed(1)}s elapsed - ETA: ${eta}s`);
       }
     }
 
-    const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+    const batches = Array.from({ length: batchesToInsert }, (_, i) => i);
+    for (let i = 0; i < batches.length; i += CONCURRENCY) {
+      const chunk = batches.slice(i, i + CONCURRENCY);
+      await Promise.all(chunk.map(insertBatch));
+    }
 
-    // Final count
+    const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
     const finalResult = await pool.query('SELECT COUNT(*) FROM expenses');
     const finalCount = parseInt(finalResult.rows[0].count);
 
-    console.log(`✅ Seeding completed!`);
+    console.log(`Seeding completed!`);
     console.log(`Total rows: ${finalCount.toLocaleString()}`);
-    console.log(`Time taken: ${totalTime} seconds (${(totalTime / 60).toFixed(1)} minutes)`);
+    console.log(`Time taken: ${totalTime}s (${(totalTime / 60).toFixed(1)} min)`);
     console.log(`Average: ${(rowsToInsert / totalTime).toFixed(0)} rows/second`);
 
   } catch (error) {
-    console.error('❌ Error seeding database:', error);
+    console.error('Error seeding database:', error);
     process.exit(1);
   } finally {
     await pool.end();
   }
 }
 
-// Run if called directly
 if (require.main === module) {
   seedDatabase();
 }

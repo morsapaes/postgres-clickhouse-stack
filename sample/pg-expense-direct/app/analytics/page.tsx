@@ -3,7 +3,14 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 
+interface QueryTiming {
+  label: string;
+  ms: number;
+}
+
 interface ExpenseStats {
+  backend: string;
+  queryTimings: QueryTiming[];
   total: {
     count: number;
     amount: number;
@@ -56,7 +63,12 @@ export default function Analytics() {
     return (
       <div className="min-h-screen bg-gray-50 py-8">
         <div className="max-w-6xl mx-auto px-4">
-          <div className="text-center">Loading analytics...</div>
+          <h1 className="text-3xl font-bold text-gray-900 mb-8">Expense Analytics</h1>
+          <div className="bg-white p-12 rounded-xl shadow-lg border border-gray-100 text-center">
+            <div className="text-2xl font-bold text-gray-700 mb-4">Loading analytics...</div>
+            <div className="text-gray-500">Querying PostgreSQL — this may take a while with large datasets.</div>
+            <div className="text-gray-400 text-sm mt-2">Tip: migrate to ClickHouse to speed this up!</div>
+          </div>
         </div>
       </div>
     );
@@ -96,10 +108,37 @@ export default function Analytics() {
 
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-gray-900">Expense Analytics</h1>
-          {loadTime && (
-            <p className="text-sm text-gray-700 mt-2 font-medium bg-blue-50 px-3 py-1 rounded-md inline-block">
-              ⚡ Analytics loaded in {loadTime}ms across {stats?.total.count.toLocaleString()} expenses
-            </p>
+          <div className="mt-4 flex flex-wrap gap-3 items-center">
+            <span className={`px-3 py-1 rounded-full text-sm font-bold ${
+              stats.backend.includes('ClickHouse')
+                ? 'bg-yellow-100 text-yellow-800'
+                : 'bg-blue-100 text-blue-800'
+            }`}>
+              {stats.backend}
+            </span>
+            {loadTime && (
+              <span className="px-3 py-1 rounded-full text-sm font-medium bg-gray-100 text-gray-700">
+                Total: {loadTime.toLocaleString()}ms
+              </span>
+            )}
+            <span className="px-3 py-1 rounded-full text-sm font-medium bg-gray-100 text-gray-700">
+              {stats.total.count.toLocaleString()} rows
+            </span>
+          </div>
+          {stats.queryTimings && (
+            <div className="mt-3 bg-white p-4 rounded-lg border border-gray-200">
+              <div className="text-xs font-bold text-gray-500 uppercase mb-2">Query Performance</div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {stats.queryTimings.map((t) => (
+                  <div key={t.label} className="text-center">
+                    <div className={`text-lg font-bold ${t.ms > 1000 ? 'text-red-600' : t.ms > 100 ? 'text-yellow-600' : 'text-green-600'}`}>
+                      {t.ms.toLocaleString()}ms
+                    </div>
+                    <div className="text-xs text-gray-500">{t.label}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
         </div>
 
