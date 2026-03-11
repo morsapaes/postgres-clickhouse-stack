@@ -4,7 +4,7 @@ x-minio-config: &minio-config
   PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_ACCESS_KEY_ID: _peerdb_minioadmin
   PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_SECRET_ACCESS_KEY: _peerdb_minioadmin
   PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_REGION: us-east-1
-  PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_ENDPOINT_URL_S3: http://host.docker.internal:9001
+  PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_ENDPOINT_URL_S3: http://minio:9000
   PEERDB_CLICKHOUSE_AWS_S3_BUCKET_NAME: peerdbbucket
 
 x-catalog-config: &catalog-config
@@ -31,12 +31,11 @@ x-flow-worker-env: &flow-worker-env
 
 services:
   catalog:
-    container_name: catalog
     image: postgres:18-alpine@sha256:b40d931bd0e7ce6eecc59a5a6ac3b3c04a01e559750e73e7086b6dbd7f8bf545
     command: -c config_file=/etc/postgresql.conf
     restart: unless-stopped
     ports:
-      - 9901:5432
+      - "127.0.0.1:19901:5432"
     environment:
       PGUSER: postgres
       POSTGRES_PASSWORD: postgres
@@ -45,7 +44,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
       - ./volumes/catalog/postgresql.conf:/etc/postgresql.conf
       - ./volumes/catalog/pg_hba.conf:/etc/pg_hba.conf
       - ./volumes/catalog/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
@@ -57,7 +56,6 @@ services:
       start_period: 60s
 
   temporal:
-    container_name: temporal
     restart: unless-stopped
     depends_on:
       catalog:
@@ -71,14 +69,13 @@ services:
       - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
     image: temporalio/auto-setup:1.29@sha256:8240e81d9b6946e8cc9b86714a04733cec32b1332b8523961ad47700861036f7
     ports:
-      - 7233:7233
+      - "127.0.0.1:17233:7233"
     volumes:
       - ./volumes/temporal-dynamicconfig:/etc/temporal/config/dynamicconfig
     labels:
       kompose.volume.type: configMap
 
   temporal-admin-tools:
-    container_name: temporal-admin-tools
     restart: unless-stopped
     depends_on:
       - temporal
@@ -99,25 +96,23 @@ services:
       - ./scripts/mirror-name-search.sh:/etc/temporal/entrypoint.sh
 
   temporal-ui:
-    container_name: temporal-ui
     restart: unless-stopped
     depends_on:
       - temporal
     environment:
       - TEMPORAL_ADDRESS=temporal:7233
-      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+      - TEMPORAL_CORS_ORIGINS=http://localhost:13000
       - TEMPORAL_CSRF_COOKIE_INSECURE=true
     image: temporalio/ui:2.44.0@sha256:0b36e00aad304134eb908f41bf915934afe4eef1efc5b1750c65a5312ff3c9bb
     ports:
-      - 8085:8080
+      - "127.0.0.1:18085:8080"
 
   flow-api:
-    container_name: flow_api
-    image: ghcr.io/peerdb-io/flow-api:stable-v0.36.3
+    image: ghcr.io/peerdb-io/flow-api:stable-v0.36.9
     restart: unless-stopped
     ports:
-      - 8112:8112
-      - 8113:8113
+      - "127.0.0.1:18112:8112"
+      - "127.0.0.1:18113:8113"
     environment:
       <<: [ *catalog-config, *flow-worker-env, *minio-config ]
       PEERDB_ALLOWED_TARGETS:
@@ -128,8 +123,7 @@ services:
         condition: service_healthy
 
   flow-snapshot-worker:
-    container_name: flow-snapshot-worker
-    image: ghcr.io/peerdb-io/flow-snapshot-worker:stable-v0.36.3
+    image: ghcr.io/peerdb-io/flow-snapshot-worker:stable-v0.36.9
     restart: unless-stopped
     environment:
       <<: [ *catalog-config, *flow-worker-env, *minio-config ]
@@ -138,8 +132,7 @@ services:
         condition: service_healthy
 
   flow-worker:
-    container_name: flow-worker
-    image: ghcr.io/peerdb-io/flow-worker:stable-v0.36.3
+    image: ghcr.io/peerdb-io/flow-worker:stable-v0.36.9
     restart: unless-stopped
     environment:
       <<: [ *catalog-config, *flow-worker-env, *minio-config ]
@@ -150,33 +143,31 @@ services:
         condition: service_healthy
 
   peerdb:
-    container_name: peerdb-server
     stop_signal: SIGINT
-    image: ghcr.io/peerdb-io/peerdb-server:stable-v0.36.3
+    image: ghcr.io/peerdb-io/peerdb-server:stable-v0.36.9
     restart: unless-stopped
     environment:
       <<: *catalog-config
       PEERDB_PASSWORD:
-      PEERDB_FLOW_SERVER_ADDRESS: grpc://flow_api:8112
+      PEERDB_FLOW_SERVER_ADDRESS: grpc://flow-api:8112
       RUST_LOG: info
       RUST_BACKTRACE: 1
     ports:
-      - 9900:9900
+      - "127.0.0.1:19900:9900"
     depends_on:
       catalog:
         condition: service_healthy
 
   peerdb-ui:
-    container_name: peerdb-ui
-    image: ghcr.io/peerdb-io/peerdb-ui:stable-v0.36.3
+    image: ghcr.io/peerdb-io/peerdb-ui:stable-v0.36.9
     restart: unless-stopped
     ports:
-      - 3000:3000
+      - "127.0.0.1:13000:3000"
     environment:
       <<: *catalog-config
-      PEERDB_FLOW_SERVER_HTTP: http://flow_api:8113
+      PEERDB_FLOW_SERVER_HTTP: http://flow-api:8113
       NEXTAUTH_SECRET: __changeme__
-      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_URL: http://localhost:13000
       PEERDB_ALLOWED_TARGETS:
       PEERDB_CLICKHOUSE_ALLOWED_DOMAINS:
       PEERDB_EXPERIMENTAL_ENABLE_SCRIPTING: true
@@ -189,14 +180,13 @@ services:
     volumes:
       - minio-data:/data
     ports:
-      - "9001:9000"
-      - "9002:36987"
+      - "127.0.0.1:19001:9000"
+      - "127.0.0.1:19002:36987"
     environment:
       <<: *minio-config
     entrypoint: >
       /bin/sh -c " export MINIO_ROOT_USER=$$PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_ACCESS_KEY_ID; export MINIO_ROOT_PASSWORD=$$PEERDB_CLICKHOUSE_AWS_CREDENTIALS_AWS_SECRET_ACCESS_KEY; minio server /data --console-address=":36987" & sleep 2; /usr/bin/mc alias set myminiopeerdb http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD; /usr/bin/mc mb myminiopeerdb/$$PEERDB_CLICKHOUSE_AWS_S3_BUCKET_NAME; wait "
   postgres:
-    container_name: postgres
     hostname: postgres
     image: ghcr.io/clickhouse/pg_clickhouse:18
     restart: always
@@ -205,8 +195,9 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: postgres
     ports:
-      - "5432:5432"
+      - "127.0.0.1:15432:5432"
     volumes:
+      - postgresdata:/var/lib/postgresql
       - ./volumes/postgres/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
     command:
       - "postgres"
@@ -222,23 +213,54 @@ services:
       timeout: 5s
       retries: 10
   clickhouse:
-    image: clickhouse/clickhouse-server
+    image: clickhouse:25.8
     user: "101:101"
-    container_name: clickhouse
     hostname: clickhouse
     volumes:
+      - clickhousedata:/var/lib/clickhouse
       - ./volumes/clickhouse/etc/clickhouse-server/config.d/config.xml:/etc/clickhouse-server/config.d/config.xml
       - ./volumes/clickhouse/etc/clickhouse-server/users.d/users.xml:/etc/clickhouse-server/users.d/users.xml
       - ./volumes/clickhouse/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
     ports:
-      - "127.0.0.1:8123:8123"
-      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:18123:8123"
+      - "127.0.0.1:19000:9000"
     depends_on:
       - postgres
 
+  expense-app:
+    image: node:24-alpine
+    working_dir: /app
+    volumes:
+      - ./sample/pg-expense-direct:/app
+      - sample_node_modules:/app/node_modules
+    ports:
+      - "127.0.0.1:18080:8080"
+    environment:
+      DB_HOST: postgres
+      DB_USER: admin
+      DB_PASSWORD: password
+      DB_NAME: postgres
+      DB_PORT: "5432"
+      SOURCE_SCHEMA: public
+      DESTINATION_SCHEMA: expense_ch
+      SEED_EXPENSE_ROWS: ${SEED_EXPENSE_ROWS:-10000000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: /bin/sh -c
+    command:
+      - |
+        npm install
+        npm run dev
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
 volumes:
   pgdata:
+  postgresdata:
+  clickhousedata:
   minio-data:
+  sample_node_modules:
 
 networks:
   default:

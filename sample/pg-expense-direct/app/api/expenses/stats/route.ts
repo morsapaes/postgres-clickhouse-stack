@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import pool from '@/lib/db';
+import { query as dbQuery, getBackend } from '@/lib/db';
+
+async function timedQuery(label: string, text: string, params: any[]) {
+  const start = performance.now();
+  const result = await dbQuery(text, params);
+  const ms = Math.round(performance.now() - start);
+  return { result, timing: { label, ms } };
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -13,75 +20,65 @@ export async function GET(request: NextRequest) {
 
     if (startDate) {
       paramCount++;
-      whereClause += ` AND date >= $${paramCount}`;
+      whereClause += ' AND date >= $' + paramCount;
       params.push(startDate);
     }
 
     if (endDate) {
       paramCount++;
-      whereClause += ` AND date <= $${paramCount}`;
+      whereClause += ' AND date <= $' + paramCount;
       params.push(endDate);
     }
 
-    // Total expenses
-    const totalResult = await pool.query(
-      `SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total FROM expenses ${whereClause}`,
+    const totalQuery = await timedQuery(
+      'Total expenses',
+      'SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total FROM expenses ' + whereClause,
       params
     );
 
-    // Expenses by category
-    const categoryResult = await pool.query(
-      `SELECT 
-        COALESCE(category, 'Uncategorized') as category, 
-        COUNT(*) as count, 
-        SUM(amount) as total 
-       FROM expenses ${whereClause} 
-       GROUP BY category 
-       ORDER BY total DESC`,
+    const categoryQuery = await timedQuery(
+      'By category',
+      'SELECT COALESCE(category, \'Uncategorized\') as category, COUNT(*) as count, SUM(amount) as total FROM expenses ' + whereClause + ' GROUP BY category ORDER BY total DESC',
       params
     );
 
-    // Monthly aggregation
-    const monthlyResult = await pool.query(
-      `SELECT 
-        DATE_TRUNC('month', date) as month,
-        COUNT(*) as count,
-        SUM(amount) as total
-       FROM expenses ${whereClause}
-       GROUP BY DATE_TRUNC('month', date)
-       ORDER BY month DESC`,
+    const monthlyQuery = await timedQuery(
+      'By month',
+      'SELECT DATE_TRUNC(\'month\', date) as month, COUNT(*) as count, SUM(amount) as total FROM expenses ' + whereClause + ' GROUP BY DATE_TRUNC(\'month\', date) ORDER BY month DESC',
       params
     );
 
-    // Daily aggregation for last 30 days (or filtered range)
-    const dailyResult = await pool.query(
-      `SELECT 
-        date,
-        COUNT(*) as count,
-        SUM(amount) as total
-       FROM expenses ${whereClause}
-       GROUP BY date
-       ORDER BY date DESC
-       LIMIT 30`,
+    const dailyQuery = await timedQuery(
+      'Daily activity',
+      'SELECT date, COUNT(*) as count, SUM(amount) as total FROM expenses ' + whereClause + ' GROUP BY date ORDER BY date DESC LIMIT 30',
       params
     );
+
+    const backend = getBackend();
 
     const stats = {
+      backend,
+      queryTimings: [
+        totalQuery.timing,
+        categoryQuery.timing,
+        monthlyQuery.timing,
+        dailyQuery.timing,
+      ],
       total: {
-        count: parseInt(totalResult.rows[0].count),
-        amount: parseFloat(totalResult.rows[0].total)
+        count: parseInt(totalQuery.result.rows[0].count),
+        amount: parseFloat(totalQuery.result.rows[0].total)
       },
-      byCategory: categoryResult.rows.map(row => ({
+      byCategory: categoryQuery.result.rows.map((row: any) => ({
         category: row.category,
         count: parseInt(row.count),
         total: parseFloat(row.total)
       })),
-      byMonth: monthlyResult.rows.map(row => ({
+      byMonth: monthlyQuery.result.rows.map((row: any) => ({
         month: row.month,
         count: parseInt(row.count),
         total: parseFloat(row.total)
       })),
-      daily: dailyResult.rows.map(row => ({
+      daily: dailyQuery.result.rows.map((row: any) => ({
         date: row.date,
         count: parseInt(row.count),
         total: parseFloat(row.total)

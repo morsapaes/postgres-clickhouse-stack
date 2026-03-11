@@ -10,6 +10,7 @@
     </profiles>
     <users>
         <default>
+            <password>clickhouse</password>
             <access_management>1</access_management>
             <profile>default</profile>
             <networks>

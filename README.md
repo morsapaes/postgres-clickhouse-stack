@@ -26,13 +26,9 @@ This data stack is intended for applications built on PostgreSQL that need scala
 
 ### Pre-requisites
 
-**Required** 
+**Required**
 - Docker
-- Make
-
-**Optional**
-- Postgres client
-- ClickHouse client
+- Bash
 
 ### Clone this repository
 
@@ -44,26 +40,27 @@ cd postgres-clickhouse-stack
 ### Start the Stack
 
 ```bash
-make start
+./run.sh start
 ```
 
 This will start the following services:
-- PostgreSQL (port 5432)
-- ClickHouse (ports 9000, 8123)
-- PeerDB UI (port 3000)
+- PostgreSQL (port 15432)
+- ClickHouse (ports 19000, 18123)
+- PeerDB UI (port 13000)
+- Sample expense app (port 18080)
 
 ### Stop the stack
 
 ```bash
-make stop
+./run.sh stop
 ```
 
 ### Access the services
 
-- PeerDB UI: http://localhost:3000
-- ClickHouse UI: http://localhost:8123/play
-- ClickHouse Client: `clickhouse client --host 127.0.0.1 --port 9000`
-- PostgreSQL: `psql -h localhost -p 5432 -U admin -d postgres` (password: `password`)
+- PeerDB UI: http://localhost:13000
+- ClickHouse UI: http://localhost:18123/play
+- ClickHouse Client: `./run.sh clickhouse`
+- PostgreSQL: `./run.sh psql`
 
 ## Why this setup
 
@@ -111,7 +108,7 @@ The first step is to connect to the PostgreSQL instance running in the container
 
 Configure your application to connect to the PostgreSQL instance using this configuration: 
 - Host: localhost
-- Port: 5432
+- Port: 15432
 - Username: admin
 - Password: password
 - Database: postgres
@@ -121,7 +118,7 @@ Configure your application to connect to the PostgreSQL instance using this conf
 The next step is to create the ClickHouse database where the replicated tables will be stored. 
 
 ```bash
-clickhouse client --host 127.0.0.1 --port 9000 --query "CREATE DATABASE IF NOT EXISTS mydb"
+./run.sh clickhouse --query "CREATE DATABASE IF NOT EXISTS mydb"
 ```
 
 ### Replicate data from PostgreSQL to ClickHouse
@@ -153,7 +150,7 @@ To configure the ClickHouse peer, use the following information:
 - Host: `host.docker.internal`
 - Port: `9000`
 - User: `default`
-- Password: `password`
+- Password: `clickhouse`
 - Database: `mydb`
 
 ![ClickHouse Peer](./images/peerdb-clickhouse-peer.png)
@@ -182,7 +179,7 @@ Below is an example of how you would configure pg_clickhouse in PostgreSQL to of
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_clickhouse;
 CREATE SERVER clickhouse_svr FOREIGN DATA WRAPPER clickhouse_fdw OPTIONS(dbname 'mydb', host 'host.docker.internal');
-CREATE USER MAPPING FOR CURRENT_USER SERVER clickhouse_svr OPTIONS (user 'default', password '');
+CREATE USER MAPPING FOR CURRENT_USER SERVER clickhouse_svr OPTIONS (user 'default', password 'clickhouse');
 CREATE SCHEMA IF NOT EXISTS mydb_ch;
 IMPORT FOREIGN SCHEMA mydb FROM SERVER clickhouse_svr INTO mydb_ch;
 ```
@@ -201,7 +198,7 @@ const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
   database: process.env.DB_NAME || 'postgres',
   password: process.env.DB_PASSWORD || 'password',
-  port: parseInt(process.env.DB_PORT || '5432'),
+  port: parseInt(process.env.DB_PORT || '15432'),
   options: process.env.DB_SCHEMA
     ? `-c search_path=${process.env.DB_SCHEMA},public`
     : undefined,
@@ -220,33 +217,34 @@ At a high level, the resulting architecture looks like this:
 
 The project includes a sample expense-tracking application to demonstrate the stack.
 
-The application is built with Next.js and uses PostgreSQL as its primary database. It allows you to create expenses and view an analytics dashboard. On first startup, it seeds one million rows of sample data into PostgreSQL.
+The application is built with Next.js and uses PostgreSQL as its primary database. It allows you to create expenses and view an analytics dashboard.
 
 Initially, the analytics dashboard queries PostgreSQL directly and takes several seconds to load. Using this stack, data can be synchronized from PostgreSQL to ClickHouse via PeerDB, and analytical queries offloaded from PostgreSQL to ClickHouse using pg_clickhouse, reducing dashboard load times to milliseconds.
 
-### Prerequisites
+### Using the sample application
 
-**Required**
-- Node.js 20+ and npm
-- PostgreSQL client tools 
+The sample app starts automatically with `./run.sh start` and is available at http://localhost:18080.
 
-### Start the application
+#### Seed the database
+
+Load sample data into PostgreSQL. This can take several minutes.
 
 ```bash
-make run-sample
+./run.sh seed
 ```
 
-Note that loading the sample data into PostgreSQL on the first run can take several minutes.
-
-This will start the sample application at http://localhost:8080
-
-
-### Set Up Data Replication
-
-Run the migration script to migrate the data from PostgreSQL to ClickHouse using PeerDB and configure the ClickHouse Foreign Data Wrapper to offload the queries from PostgreSQL to ClickHouse using pg_clickhouse.
+To change the number of rows (default 10 million):
 
 ```bash
-make migrate-sample
+./run.sh seed 100000000
+```
+
+#### Set up data replication
+
+Run the migration script to replicate data from PostgreSQL to ClickHouse using PeerDB and configure the ClickHouse Foreign Data Wrapper to offload queries using pg_clickhouse.
+
+```bash
+./run.sh migrate
 ```
 
 This will:
@@ -255,6 +253,13 @@ This will:
 - Start data synchronization from PostgreSQL to ClickHouse
 - Configure the ClickHouse Foreign Data Wrapper
 
-Refresh the [analytics dashboard](http://localhost:8080/analytics) and you should see the load time drop from several seconds to milliseconds. 
+Refresh the [analytics dashboard](http://localhost:18080/analytics) and you should see the load time drop from several seconds to milliseconds.
 
-With 10 million rows, the gap between PostgreSQL and ClickHouse is not very noticeable. On a typical setup, query time drops from around 2 seconds to about 300 ms, though exact numbers depend on your environment. To see a more significant difference, you can increase the number of rows by setting the `SEED_EXPENSE_ROWS` environment variable. I'd recommend setting it to at least 100M rows.
+To switch between backends, use the toggle on the analytics page or:
+
+```bash
+./run.sh use-postgres     # switch back to PostgreSQL
+./run.sh use-clickhouse   # switch to ClickHouse
+```
+
+With 10 million rows, the gap between PostgreSQL and ClickHouse is not very noticeable. On a typical setup, query time drops from around 2 seconds to about 300 ms, though exact numbers depend on your environment. To see a more significant difference, try increasing `SEED_EXPENSE_ROWS` to at least 100 million.
