@@ -1,53 +1,413 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-# PostgreSQL + ClickHouse = The Open Source Unified Data Stack
+# Postgres + ClickHouse = The Open Source Unified Data Stack
 
-This repository provides a ready-to-use open source data stack that combines PostgreSQL and ClickHouse to handle transactional and analytical workloads.
+This repository provides a ready-to-use open source data stack that combines [Postgres](https://www.Postgres.org/) and [ClickHouse](https://clickhouse.com/) to handle both transactional and analytical workloads.
 
-PostgreSQL remains the primary database for transactional workloads and acts as the source of truth for application data. PeerDB streams data changes to ClickHouse using CDC, keeping it in sync near real time for analytics. The included pg_clickhouse extension allows PostgreSQL to transparently offload analytical queries to ClickHouse.
+Postgres is the primary database and source of truth for application data. [PeerDB](https://www.peerdb.io/) streams changes to ClickHouse using CDC, keeping it in sync in near real time. The [`pg_clickhouse`](https://clickhouse.com/blog/introducing-pg_clickhouse) extension allows Postgres to transparently offload analytical queries to ClickHouse without any application code changes.
 
-This data stack is intended for applications built on PostgreSQL that need scalable, low-latency analytics as data volume grows, without rewriting application code or building custom pipelines.
+## What's included
 
-## What this stack includes
+| Component | Role |
+|-----------|------|
+| **Postgres** | OLTP database, source of truth |
+| **ClickHouse** | OLAP database, optimized for aggregations |
+| **PeerDB** | CDC-based replication from Postgres to ClickHouse |
+| **pg_clickhouse** | FDW extension for transparent query offloading |
+| **Expense app** | Sample Next.js app to demonstrate the end-to-end stack |
 
-### PostgreSQL
-- OLTP database
-- Source of truth for application data
-- Comes with the pg_clickhouse extension pre-installed
+## Architecture
 
-### ClickHouse
-- OLAP database
-- Optimized for large-scale aggregations and reporting queries
+![Architecture](./images/architecture-main.png)
 
-### PeerDB
-- CDC-based replication from PostgreSQL to ClickHouse
+The sample app uses a single table:
 
-## Getting started
+```sql
+CREATE TABLE expenses (
+  id          SERIAL PRIMARY KEY,
+  description TEXT           NOT NULL,
+  amount      DECIMAL(10,2)  NOT NULL,
+  category    VARCHAR(100),
+  date        DATE           NOT NULL DEFAULT CURRENT_DATE,
+  created_at  TIMESTAMP      DEFAULT CURRENT_TIMESTAMP
+);
+```
 
-### Pre-requisites
+PeerDB replicates this table to ClickHouse (`expense` database). The `pg_clickhouse` FDW then exposes the ClickHouse copy back into Postgres as a foreign table under the `expense_ch` schema. The app can then route analytical queries to ClickHouse simply by changing `search_path`, with no SQL changes required.
 
-**Required**
+---
+
+## Workshop walkthrough
+
+### Prerequisites
+
 - Docker
 - Bash
 
-### Clone this repository
+> **OrbStack users:** when configuring PeerDB peers below, use service names (`postgres`, `clickhouse`) as the host instead of `host.docker.internal`. OrbStack does not route inter-container traffic through the host, so `host.docker.internal` will fail with a connection refused error.
+
+---
+
+### Step 1: Connect to Postgres
 
 ```bash
 git clone git@github.com:ClickHouse/postgres-clickhouse-stack.git
 cd postgres-clickhouse-stack
-```
-
-### Start the Stack
-
-```bash
 ./run.sh start
 ```
 
-This will start the following services:
-- PostgreSQL (port 15432)
-- ClickHouse (ports 19000, 18123)
-- PeerDB UI (port 13000)
-- Sample expense app (port 18080)
+This starts all services:
+
+| Service | URL |
+|---------|-----|
+| Expense app | http://localhost:18080 |
+| PeerDB UI | http://localhost:13000 |
+| ClickHouse UI | http://localhost:18123/play |
+
+Open two terminal windows — one for each database. You'll keep them both running throughout the workshop.
+
+---
+
+Open a Postgres session:
+
+```bash
+./run.sh psql
+```
+
+Take a look at what's already set up:
+
+```sql
+-- What tables exist?
+\dt
+
+-- What does the expenses table look like?
+\d expenses
+```
+
+Insert a few rows directly via SQL:
+
+```sql
+INSERT INTO expenses (description, amount, category) VALUES
+  ('Lunch',  18.50, 'Food'),
+  ('Taxi',   12.00, 'Transport'),
+  ('Book',   24.99, 'Education');
+```
+
+Then open the expense app at http://localhost:18080 and add one more record using the UI. Come back to the psql session and confirm all rows are there:
+
+```sql
+SELECT * FROM expenses;
+```
+
+This establishes the "before" state — data exists in Postgres, and nowhere else yet.
+
+---
+
+### Step 2: Connect to ClickHouse
+
+Open a ClickHouse session in the second terminal:
+
+```bash
+./run.sh clickhouse
+```
+
+```sql
+-- What databases exist?
+SHOW DATABASES;
+```
+
+ClickHouse has no `expense` database yet, so it knows nothing about the data in Postgres. The next steps will change that.
+
+---
+
+Before setting up replication, you need to create the destination database in ClickHouse manually. PeerDB will replicate tables into it, but it won't create the database itself.
+
+The name you choose here needs to match the database you specify when configuring the ClickHouse peer in PeerDB (Step 5) and in the FDW setup (Step 8). In this demo it's `expense`.
+
+```sql
+-- In the ClickHouse session
+CREATE DATABASE IF NOT EXISTS expense;
+
+SHOW DATABASES;
+-- 'expense' now appears
+
+SHOW TABLES FROM expense;
+-- empty for now, PeerDB will populate this
+```
+
+---
+
+### Step 3: Set up Change Data Capture (CDC)
+
+Open the [PeerDB UI](http://localhost:13000) and navigate to **Peers → Create peer**.
+
+PeerDB needs to know how to connect to both databases. Think of a peer as a saved connection: source on one side, destination on the other.
+
+#### Create a Postgres peer
+
+| Field | Value |
+|-------|-------|
+| Name | `postgres` |
+| Host | `postgres` (OrbStack) or `host.docker.internal` (Docker Desktop) |
+| Port | `5432` |
+| User | `admin` |
+| Password | `password` |
+| Database | `postgres` |
+
+Click **Validate**, then **Create peer**.
+
+#### Create a ClickHouse peer
+
+| Field | Value |
+|-------|-------|
+| Name | `clickhouse` |
+| Host | `clickhouse` (OrbStack) or `host.docker.internal` (Docker Desktop) |
+| Port | `9000` |
+| User | `default` |
+| Password | `clickhouse` |
+| Database | `expense` |
+
+Click **Validate**, then **Create peer**.
+
+---
+
+#### Create a CDC mirror from Postgres to ClickHouse
+
+In the PeerDB UI, navigate to **Mirrors → Create mirror** and select **CDC**.
+
+| Field | Value |
+|-------|-------|
+| Name | `expense_replication` |
+| Source peer | `postgres` |
+| Destination peer | `clickhouse` |
+
+Under **Tables**, select `public.expenses` and confirm the destination table name is `expenses`.
+
+Click **Create mirror**.
+
+PeerDB will first take an initial snapshot of the existing rows, then switch to streaming new changes in real time by tailing the Postgres WAL (write-ahead log). You can watch the snapshot progress in the mirror status page.
+
+---
+
+### Step 4: What are we looking at?
+
+Once the initial snapshot completes, verify the rows have landed in ClickHouse:
+
+```sql
+-- In the ClickHouse session
+SHOW TABLES FROM expense;
+-- 'expenses' now appears
+
+DESCRIBE expense.expenses;
+```
+
+Run an aggregation to confirm the data is there and get a feel for what ClickHouse is good at:
+
+```sql
+SELECT
+    category,
+    count(*)    AS total,
+    sum(amount) AS total_spent
+FROM expense.expenses
+GROUP BY category
+ORDER BY total_spent DESC;
+```
+
+Now go to the Postgres session and insert a new row:
+
+```sql
+-- In the Postgres session
+INSERT INTO expenses (description, amount, category)
+VALUES ('Coffee', 3.50, 'Food');
+```
+
+Switch back to the ClickHouse session and re-run the aggregation. The new row should already be reflected:
+
+```sql
+-- In the ClickHouse session
+SELECT
+    category,
+    count(*)    AS total,
+    sum(amount) AS total_spent
+FROM expense.expenses
+GROUP BY category
+ORDER BY total_spent DESC;
+```
+
+No batch job, no polling. PeerDB decoded the change from the Postgres WAL and streamed it directly to ClickHouse. Try an UPDATE too:
+
+```sql
+-- In the Postgres session
+UPDATE expenses SET amount = 4.50 WHERE description = 'Coffee';
+```
+
+```sql
+-- In the ClickHouse session
+SELECT category, count(*), sum(amount) AS total_spent
+FROM expense.expenses
+GROUP BY category
+ORDER BY total_spent DESC;
+```
+
+---
+
+### Step 5: Offload app analytics to ClickHouse
+
+Data is replicating. Now configure the `pg_clickhouse` foreign data wrapper (FDW) so Postgres can push analytical queries directly to ClickHouse transparently, without the application knowing.
+
+Run this in the Postgres session:
+
+```sql
+-- Register ClickHouse as a foreign server
+-- 'expense' must match the ClickHouse database created in Step 4
+CREATE SERVER clickhouse_svr FOREIGN DATA WRAPPER clickhouse_fdw
+  OPTIONS (dbname 'expense', host 'clickhouse');
+
+-- Map the current Postgres user to the ClickHouse default user
+CREATE USER MAPPING FOR CURRENT_USER SERVER clickhouse_svr
+  OPTIONS (user 'default', password 'clickhouse');
+
+-- Create a schema to hold the foreign table definitions
+CREATE SCHEMA IF NOT EXISTS expense_ch;
+
+-- Import all tables from ClickHouse's 'expense' database into that schema
+IMPORT FOREIGN SCHEMA expense FROM SERVER clickhouse_svr INTO expense_ch;
+```
+
+Verify everything is in place:
+
+```sql
+-- The pg_clickhouse extension should now be visible
+\dx
+
+-- The new schema should appear alongside public
+\dn
+
+-- Compare the real table and the foreign table (same columns, different backends)
+\d expenses
+\d expense_ch.expenses
+```
+
+The key difference: `expenses` is a real Postgres table. `expense_ch.expenses` is a foreign table (i.e. a pointer to ClickHouse). Any query against it gets pushed down and executed in ClickHouse.
+
+---
+
+### Step 6: Run the same query against both tables
+
+Run the same aggregation against both tables and compare:
+
+```sql
+-- Against Postgres (local execution)
+SELECT
+    category,
+    count(*)    AS total,
+    sum(amount) AS total_spent
+FROM expenses
+GROUP BY category
+ORDER BY total_spent DESC;
+
+-- Against ClickHouse via the FDW (push-down execution)
+SET search_path = expense_ch, public;
+
+SELECT
+    category,
+    count(*)    AS total,
+    sum(amount) AS total_spent
+FROM expenses
+GROUP BY category
+ORDER BY total_spent DESC;
+```
+
+The results are identical. But look at the query plan for the second query:
+
+```sql
+EXPLAIN SELECT
+    category,
+    count(*)    AS total,
+    sum(amount) AS total_spent
+FROM expenses
+GROUP BY category
+ORDER BY total_spent DESC;
+```
+
+The plan shows `Foreign Scan ... Aggregate on (expenses)`, which means that Postgres is not doing any of the aggregation work itself. The entire query was pushed down to ClickHouse and Postgres just returned the result.
+
+Reset the search path when done:
+
+```sql
+SET search_path = public;
+```
+
+---
+
+### Step 7: Compare query performance at scale
+
+Seed Postgres with enough data to see a meaningful difference:
+
+```bash
+./run.sh seed              # 10 million rows (default)
+./run.sh seed 100000000    # 100 million rows (recommended)
+```
+
+Wait for PeerDB to finish replicating the seeded rows (monitor progress in the PeerDB UI), then time the same aggregation against both backends:
+
+```sql
+\timing on
+
+-- Postgres
+SELECT
+    category,
+    count(*)    AS total,
+    sum(amount) AS total_spent
+FROM expenses
+GROUP BY category
+ORDER BY total_spent DESC;
+
+-- ClickHouse via FDW
+SET search_path = expense_ch, public;
+
+SELECT
+    category,
+    count(*)    AS total,
+    sum(amount) AS total_spent
+FROM expenses
+GROUP BY category
+ORDER BY total_spent DESC;
+```
+
+You can also use the toggle on the [analytics dashboard](http://localhost:18080/analytics) to switch backends visually, or from the terminal:
+
+```bash
+./run.sh use-postgres     # query public.expenses directly
+./run.sh use-clickhouse   # query via expense_ch (FDW → ClickHouse)
+```
+
+The app switches by changing `search_path` on the connection (no SQL changes):
+
+```typescript
+const pool = new Pool({
+  ...
+  options: process.env.DB_SCHEMA
+    ? `-c search_path=${process.env.DB_SCHEMA},public`
+    : undefined,
+});
+```
+
+When `DB_SCHEMA=expense_ch`, Postgres resolves `expenses` to the foreign table and the query executes in ClickHouse.
+
+---
+
+### Fell behind? Catch up with one command
+
+To skip Steps 4–8 and jump straight to the performance comparison:
+
+```bash
+./run.sh migrate
+```
+
+This automates everything: creates the ClickHouse database, configures both PeerDB peers, starts the CDC mirror, and sets up the FDW.
+
+---
 
 ### Stop the stack
 
@@ -55,211 +415,16 @@ This will start the following services:
 ./run.sh stop
 ```
 
-### Access the services
+---
 
-- PeerDB UI: http://localhost:13000
-- ClickHouse UI: http://localhost:18123/play
-- ClickHouse Client: `./run.sh clickhouse`
-- PostgreSQL: `./run.sh psql`
+## Using this stack with your own application
 
-## Why this setup
+The sample app demonstrates one specific schema, but the pattern generalises to any Postgres application:
 
-PostgreSQL is an excellent choice as a primary database for an application, but analytical queries such as dashboards, reports, and ad-hoc exploration become slower and more expensive as data volumes increase. Using a purpose-built analytical database such as ClickHouse is a better fit for these use cases.
+1. Identify the tables used for analytical queries.
+2. Create a matching database in ClickHouse.
+3. Configure PeerDB peers and a CDC mirror via the [PeerDB UI](http://localhost:13000) or API.
+4. Run the FDW setup substituting your database name.
+5. Set `search_path` to your foreign schema on the analytical connection.
 
-This stack separates concerns:
-- PostgreSQL handles transactions, writes, and point queries.
-- ClickHouse handles aggregations and analytical workloads.
-- PeerDB keeps both systems in sync in near real time.
-- pg_clickhouse allows PostgreSQL to transparently offload eligible queries to ClickHouse.
-
-The result is a simple architecture that scales analytics without disrupting the application.
-
-## Typical workflow
-
-1. An application writes all data to PostgreSQL.
-2. PeerDB streams changes from PostgreSQL to ClickHouse using CDC.
-3. Analytical tables are maintained in ClickHouse.
-4. Reporting and analytics queries run on ClickHouse.
-5. When using pg_clickhouse, some analytical queries issued to PostgreSQL are automatically offloaded to ClickHouse.
-
-From the application’s point of view, PostgreSQL remains the primary interface.
-
-## Architecture
-
-![Architecture](./images/architecture-main.png)
-
-- **PostgreSQL**: Source of truth for transactional data
-- **PeerDB**: CDC pipeline for real-time replication
-- **ClickHouse**: Analytical store for fast aggregations
-- **pg_clickhouse**: Transparent query offloading from PostgreSQL to ClickHouse
-
-
-## How to use the stack
-
-Using the stack with your own application is very simple.
-
-Assuming PostgreSQL is the primary database of your application, start by connecting it to the PostgreSQL instance running in the container.
-
-Next, identify the tables most commonly used for analytical queries and replicate them to ClickHouse using PeerDB. Finally, configure the ClickHouse foreign data wrapper with pg_clickhouse to offload analytical queries from PostgreSQL to ClickHouse.
-
-### Connect to PostgreSQL 
-
-The first step is to connect to the PostgreSQL instance running in the container. 
-
-Configure your application to connect to the PostgreSQL instance using this configuration: 
-- Host: localhost
-- Port: 15432
-- Username: admin
-- Password: password
-- Database: postgres
-
-### Create the ClickHouse database
-
-The next step is to create the ClickHouse database where the replicated tables will be stored. 
-
-```bash
-./run.sh clickhouse --query "CREATE DATABASE IF NOT EXISTS mydb"
-```
-
-### Replicate data from PostgreSQL to ClickHouse
-
-[PeerDB documentation](https://docs.peerdb.io/mirror/cdc-pg-clickhouse) provides a detailed guide on how to configure peers to replicate data from PostgreSQL to ClickHouse.
-
-First start by creating two peers, one for PostgreSQL and one for ClickHouse. 
-
-This can be done using the PeerDB UI or the PeerDB API. 
-
-#### PostgreSQL Peer
-
-To configure the PostgreSQL peer, use the following information:
-
-- Name: `postgres`
-- Host: `host.docker.internal`
-- Port: `5432`
-- User: `admin`
-- Password: `password`
-- Database: `postgres`
-
-![PostgreSQL Peer](./images/peerdb-postgresql-peer.png)
-
-#### ClickHouse Peer
-
-To configure the ClickHouse peer, use the following information:
-
-- Name: `clickhouse`
-- Host: `host.docker.internal`
-- Port: `9000`
-- User: `default`
-- Password: `clickhouse`
-- Database: `mydb`
-
-![ClickHouse Peer](./images/peerdb-clickhouse-peer.png)
-
-#### Configure Mirror replication
-
-Once the peers are created, you can configure the mirror replication. You have the choice between different replication strategies. When replicating from PostgreSQL to ClickHouse, we recommend using the `CDC` replication strategy.
-
-You will need the following informations to configure the mirror replication:
-
-- Name: 'clickhouse_replication'
-- Source Peer: `postgres`
-- Target Peer: `clickhouse`
-- Replication Strategy: `CDC`
-
-Then select the tables you want to replicate from PostgreSQL to ClickHouse. Check the target table name in ClickHouse, it's best if it matches the source table name so we can leverage the schema import feature of pg_clickhouse.
-
-![Mirror Replication](./images/peerdb-mirror-configuration.png)
-
-### Configure ClickHouse Foreign Data Wrapper
-
-[pg_clickhouse documentation](https://github.com/ClickHouse/pg_clickhouse/blob/main/doc/tutorial.md) provides a detailed guide on how to configure the ClickHouse foreign data wrapper with pg_clickhouse to offload analytical queries from PostgreSQL to ClickHouse.
-
-Below is an example of how you would configure pg_clickhouse in PostgreSQL to offload analytical queries to ClickHouse for the database `mydb`.
-
-```sql
-CREATE EXTENSION IF NOT EXISTS pg_clickhouse;
-CREATE SERVER clickhouse_svr FOREIGN DATA WRAPPER clickhouse_fdw OPTIONS(dbname 'mydb', host 'host.docker.internal');
-CREATE USER MAPPING FOR CURRENT_USER SERVER clickhouse_svr OPTIONS (user 'default', password 'clickhouse');
-CREATE SCHEMA IF NOT EXISTS mydb_ch;
-IMPORT FOREIGN SCHEMA mydb FROM SERVER clickhouse_svr INTO mydb_ch;
-```
-
-### Configure application to use ClickHouse for analytical queries
-
-Once data is replicated from PostgreSQL to ClickHouse, the application can be configured to route analytical queries to ClickHouse. This is done by querying a dedicated PostgreSQL schema backed by pg_clickhouse.
-
-The PostgreSQL client can be configured to use this schema by setting the search_path option in the connection string. In this project, the DB_SCHEMA environment variable is used to control this behavior. 
-
-In this example, DB_SCHEMA is set to `mydb_ch`.
-
-```typescript
-const pool = new Pool({
-  user: process.env.DB_USER || 'admin',
-  host: process.env.DB_HOST || 'localhost',
-  database: process.env.DB_NAME || 'postgres',
-  password: process.env.DB_PASSWORD || 'password',
-  port: parseInt(process.env.DB_PORT || '15432'),
-  options: process.env.DB_SCHEMA
-    ? `-c search_path=${process.env.DB_SCHEMA},public`
-    : undefined,
-});
-```
-
-#### Connect directly to ClickHouse
-
-If you want the application to talk to ClickHouse directly, you can use any of the available ClickHouse client libraries. Changes on the application side should still be fairly simple as ClickHouse supports SQL queries that are compatible with PostgreSQL.
-
-At a high level, the resulting architecture looks like this:
-
-![Architecture](./images/integration-architecture-1.png)
-
-## Sample application 
-
-The project includes a sample expense-tracking application to demonstrate the stack.
-
-The application is built with Next.js and uses PostgreSQL as its primary database. It allows you to create expenses and view an analytics dashboard.
-
-Initially, the analytics dashboard queries PostgreSQL directly and takes several seconds to load. Using this stack, data can be synchronized from PostgreSQL to ClickHouse via PeerDB, and analytical queries offloaded from PostgreSQL to ClickHouse using pg_clickhouse, reducing dashboard load times to milliseconds.
-
-### Using the sample application
-
-The sample app starts automatically with `./run.sh start` and is available at http://localhost:18080.
-
-#### Seed the database
-
-Load sample data into PostgreSQL. This can take several minutes.
-
-```bash
-./run.sh seed
-```
-
-To change the number of rows (default 10 million):
-
-```bash
-./run.sh seed 100000000
-```
-
-#### Set up data replication
-
-Run the migration script to replicate data from PostgreSQL to ClickHouse using PeerDB and configure the ClickHouse Foreign Data Wrapper to offload queries using pg_clickhouse.
-
-```bash
-./run.sh migrate
-```
-
-This will:
-- Create the ClickHouse database
-- Configure PeerDB peers
-- Start data synchronization from PostgreSQL to ClickHouse
-- Configure the ClickHouse Foreign Data Wrapper
-
-Refresh the [analytics dashboard](http://localhost:18080/analytics) and you should see the load time drop from several seconds to milliseconds.
-
-To switch between backends, use the toggle on the analytics page or:
-
-```bash
-./run.sh use-postgres     # switch back to PostgreSQL
-./run.sh use-clickhouse   # switch to ClickHouse
-```
-
-With 10 million rows, the gap between PostgreSQL and ClickHouse is not very noticeable. On a typical setup, query time drops from around 2 seconds to about 300 ms, though exact numbers depend on your environment. To see a more significant difference, try increasing `SEED_EXPENSE_ROWS` to at least 100 million.
+See the [PeerDB CDC documentation](https://docs.peerdb.io/mirror/cdc-pg-clickhouse) and the [pg_clickhouse tutorial](https://github.com/ClickHouse/pg_clickhouse/blob/main/doc/tutorial.md) for full details.
