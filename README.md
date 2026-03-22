@@ -258,6 +258,8 @@ Data is replicating. Now configure the `pg_clickhouse` foreign data wrapper (FDW
 Run this in the Postgres session:
 
 ```sql
+CREATE EXTENSION IF NOT EXISTS pg_clickhouse;
+
 -- Register ClickHouse as a foreign server
 -- 'expense' must match the ClickHouse database created in Step 4
 CREATE SERVER clickhouse_svr FOREIGN DATA WRAPPER clickhouse_fdw
