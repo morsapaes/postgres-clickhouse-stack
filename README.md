@@ -229,7 +229,7 @@ SELECT
     category,
     count(*)    AS total,
     sum(amount) AS total_spent
-FROM expense.expenses
+FROM expense.public_expenses
 GROUP BY category
 ORDER BY total_spent DESC;
 ```
@@ -244,7 +244,7 @@ UPDATE expenses SET amount = 4.50 WHERE description = 'Coffee';
 ```sql
 -- In the ClickHouse session
 SELECT category, count(*), sum(amount) AS total_spent
-FROM expense.expenses
+FROM expense.public_expenses
 GROUP BY category
 ORDER BY total_spent DESC;
 ```
