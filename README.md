@@ -313,7 +313,7 @@ SELECT
     category,
     count(*)    AS total,
     sum(amount) AS total_spent
-FROM expenses
+FROM public_expenses
 GROUP BY category
 ORDER BY total_spent DESC;
 ```
@@ -325,7 +325,7 @@ EXPLAIN SELECT
     category,
     count(*)    AS total,
     sum(amount) AS total_spent
-FROM expenses
+FROM public_expenses
 GROUP BY category
 ORDER BY total_spent DESC;
 ```
@@ -370,7 +370,7 @@ SELECT
     category,
     count(*)    AS total,
     sum(amount) AS total_spent
-FROM expenses
+FROM public_expenses
 GROUP BY category
 ORDER BY total_spent DESC;
 ```
